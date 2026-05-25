@@ -187,7 +187,6 @@ google-cloud-speech==2.38.0
 google-cloud-storage==3.10.1
 google-cloud-trace==1.19.0
 google-cloud-translate==3.26.0
-google-colab @ file:///colabtools/dist/google_colab-1.0.0.tar.gz
 google-crc32c==1.8.0
 google-genai==1.68.0
 google-generativeai==0.8.6
