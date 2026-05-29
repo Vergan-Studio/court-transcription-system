@@ -1,0 +1,24 @@
+{
+  "label": "final_evaluation_v2",
+  "timestamp": "20260526_073928",
+  "total_samples": 29,
+  "average_wer": 20.37,
+  "per_accent_wer": {
+    "afemai": 27.47,
+    "bajju": 5.56,
+    "berom": 4.0,
+    "ebiobo": 6.45,
+    "eggon": 30.0,
+    "igbo and yoruba": 8.0,
+    "isixhosa": 7.41,
+    "itsekiri": 0.0,
+    "jukun": 0.0,
+    "okirika": 1.92,
+    "setswana": 28.57
+  },
+  "baselines": {
+    "raw_audio": 35.22,
+    "after_etl": 25.5,
+    "after_finetune": 18.83
+  }
+}

@@ -1,9 +1,8 @@
 from fastapi import FastAPI, UploadFile, File
 from app.services.pipeline_service import process_audio
-from utils.audio_service import save_upload, convert_to_wav, cleanup
+from app.utils.audio_service import save_upload, convert_to_wav, cleanup
 
 app = FastAPI()
-
 
 @app.post("/transcribe")
 async def transcribe_audio(file: UploadFile = File(...)):
