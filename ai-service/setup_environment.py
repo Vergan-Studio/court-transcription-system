@@ -41,7 +41,11 @@ pip(
 pip(
     'opentelemetry-exporter-otlp>=1.34.0',
     'pyannoteai-sdk>=0.3.0',
-    'openai-whisper'
+    'openai-whisper',
+    'datasets',
+    'soundfile',
+    'pandas',
+    'tqdm'
 )
 
 # Step 3 - Verify

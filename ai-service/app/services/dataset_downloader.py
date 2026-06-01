@@ -1,6 +1,7 @@
 import os
 import csv
 from pathlib import Path
+from random import sample
 from datasets import load_dataset
 
 from app.config import DATASETS_DIR
@@ -26,6 +27,7 @@ AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 TARGET_LANGUAGE = "en"
 
+os.environ["DATASETS_NO_TORCH_CODEC"] = "1"
 
 # ==================================================
 # 1. COMMON VOICE (STREAMING SAFE MODE)
@@ -38,14 +40,15 @@ def stream_common_voice():
     - broken HF cache
     - incomplete dataset downloads
     """
-
+   
     print("📥 Streaming Common Voice (EN)...")
 
     dataset = load_dataset(
         "mozilla-foundation/common_voice_17_0",
         "en",
         split="train",
-        streaming=True
+        streaming=True,
+        trust_remote_code=True
     )
 
     return dataset
@@ -101,10 +104,11 @@ def save_streaming_sample(sample, writer):
             return
 
         writer.writerow({
-            "audio_path": sample.get("path", ""),
+            "audio_path": sample.get("audio", {}).get("path", ""),
             "transcript": text.strip(),
             "dataset": "common_voice"
         })
+        
 
     except Exception:
         pass
