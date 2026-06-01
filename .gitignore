@@ -1,5 +1,6 @@
 # Python virtual environment
-ai-service/court-venv/
+.venv/
+venv/
 datasets/
 ai-service/samples
 

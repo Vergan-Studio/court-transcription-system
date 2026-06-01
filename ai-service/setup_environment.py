@@ -4,8 +4,8 @@
 # ============================================
 
 # Step 1 - Mount Drive
-from google.colab import drive
-drive.mount('/content/drive')
+# from google.colab import drive
+# drive.mount('/content/drive')
 
 # Step 2 - Install in correct order using shell commands
 import subprocess

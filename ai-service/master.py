@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
-
+from app.services.dataset_downloader import run_dataset_download
 BASE_DIR = "/content/drive/MyDrive/speech-to-text-system/ai-service"
 
 
-# ── SETUP FUNCTION ─────────────────────────────
-def setup_environment():
-    try:
-        import torch
-        import transformers
-        import peft
-        print("✅ Environment already ready")
+# # ── SETUP FUNCTION ─────────────────────────────
+# def setup_environment():
+#     try:
+#         import torch
+#         import transformers
+#         import peft
+#         print("✅ Environment already ready")
 
-    except Exception:
-        print("❌ Environment not ready.")
-        print("Run setup_colab.py first.")
-        exit()
+#     except Exception:
+#         print("❌ Environment not ready.")
+#         print("Run setup_colab.py first.")
+#         exit()
 
 
 # ── PIPELINE FUNCTIONS ─────────────────────────
+def run_dataset_pipeline():
+    run_dataset_download()
+
 def run_etl():
     from run_etl import main
     main()
@@ -46,10 +49,11 @@ def run_evaluate():
 
 # ── MENU ───────────────────────────────────────
 def menu():
-    setup_environment()  # 👈 IMPORTANT: always run first
+    # setup_environment()  # 👈 IMPORTANT: always run first
 
     while True:
         print("\n===== MASTER CONTROL =====")
+        print("0. Dataset Pipeline")
         print("1. ETL")
         print("2. Train")
         print("3. Transcribe")
@@ -60,7 +64,9 @@ def menu():
 
         choice = input("Select option: ").strip()
 
-        if choice == "1":
+        if choice == "0":
+            run_dataset_pipeline()
+        elif choice == "1":
             run_etl()
 
         elif choice == "2":
