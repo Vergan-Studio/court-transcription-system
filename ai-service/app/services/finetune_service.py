@@ -1,104 +1,92 @@
-
 import os
 import torch
-import pandas as pd
+import json
 import numpy as np
+import soundfile as sf
+from functools import wraps
 from dataclasses import dataclass
 from typing import Any, Dict, List, Union
 from torch.utils.data import Dataset
+from datasets import load_from_disk
 from transformers import (
-    WhisperFeatureExtractor,
-    WhisperTokenizer,
     WhisperProcessor,
     WhisperForConditionalGeneration,
     Seq2SeqTrainingArguments,
     Seq2SeqTrainer,
 )
 from peft import LoraConfig, get_peft_model, TaskType
-import soundfile as sf
-import json
 from transformers.trainer_utils import get_last_checkpoint
 from app.config import (
     BASE_MODEL,
     OUTPUT_DIR,
-    TRAIN_CSV,
-    VAL_CSV,
-    VOCAB_PATH,
     MAX_STEPS,
     SAVE_STEPS,
     EVAL_STEPS,
     BATCH_SIZE,
     LEARNING_RATE,
-    SAMPLE_RATE,
     RESUME_FROM_CHECKPOINT,
     CHECKPOINT_DIR
 )
 
-
-# ── Load court vocabulary prompt ──────────────────────────────────
-def get_initial_prompt(tokenizer):
-    """Load court vocabulary and create initial prompt tokens."""
-    try:
-        with open(VOCAB_PATH) as f:
-            vocab = json.load(f)
-        terms  = []
-        for category, words in vocab.items():
-            terms.extend(words)
-        prompt = "Court proceedings transcript. Legal terminology: " + ", ".join(terms[:30])
-        prompt_ids = tokenizer(prompt, return_tensors="pt").input_ids
-        print(f"Court vocabulary prompt: {len(terms)} terms loaded")
-        return prompt_ids
-    except Exception as e:
-        print(f"Vocabulary not found, proceeding without prompt: {e}")
-        return None
-
-
-# ── Dataset class ─────────────────────────────────────────────────
-class AfriSpeechDataset(Dataset):
-    def __init__(self, df, processor, prompt_ids=None):
-        self.df         = df.reset_index(drop=True)
-        self.processor  = processor
-        self.prompt_ids = prompt_ids
+# ── Adaptive Dataset Wrapper ──────────────────────────────────────
+class AdaptiveWhisperDataset(Dataset):
+    def __init__(self, hf_dataset, processor):
+        self.dataset = hf_dataset
+        self.processor = processor
+        
+        cols = hf_dataset.column_names
+        self.text_col = "transcript" if "transcript" in cols else ("sentence" if "sentence" in cols else "text")
+        self.path_col = "audio_path" if "audio_path" in cols else ("path" if "path" in cols else None)
+        self.has_audio_col = "audio" in cols
 
     def __len__(self):
-        return len(self.df)
+        return len(self.dataset)
 
     def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-
-        # Load audio
-        try:
-            audio, sr = sf.read(row["audio_path"])
-        except Exception:
-            # Return empty sample if file unreadable
-            audio = np.zeros(SAMPLE_RATE, dtype=np.float32)
-            sr    = SAMPLE_RATE
-
+        row = self.dataset[idx]
+        
+        if "input_features" in row and "labels" in row:
+            return {
+                "input_features": row["input_features"],
+                "labels": row["labels"]
+            }
+            
+        audio = None
+        sr = 16000
+        
+        if self.has_audio_col and isinstance(row["audio"], dict) and "array" in row["audio"]:
+            audio = row["audio"]["array"]
+            sr = row["audio"].get("sampling_rate", 16000)
+        elif self.path_col and row[self.path_col]:
+            try:
+                audio, sr = sf.read(row[self.path_col])
+            except Exception:
+                pass
+        
         if audio is None or len(audio) == 0:
-            audio = np.zeros(SAMPLE_RATE, dtype=np.float32)
-
+            audio = np.zeros(16000, dtype=np.float32)
+            sr = 16000
+            
         audio = audio.astype(np.float32)
-
-        # Extract features
+        
         input_features = self.processor.feature_extractor(
             audio,
-            sampling_rate=SAMPLE_RATE,
+            sampling_rate=sr,
             return_tensors="pt"
         ).input_features[0]
-
-        # Tokenize transcript
+        
+        text_str = str(row[self.text_col]) if self.text_col in row else ""
         labels = self.processor.tokenizer(
-            str(row["transcript"]),
+            text_str,
             return_tensors="pt"
         ).input_ids[0]
-
+        
         return {
             "input_features": input_features,
-            "labels":         labels
+            "labels": labels
         }
 
-
-# ── Data collator ─────────────────────────────────────────────────
+# ── Data Collator ─────────────────────────────────────────────────
 @dataclass
 class DataCollatorSpeechSeq2SeqWithPadding:
     processor: Any
@@ -113,8 +101,15 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         labels_batch   = self.processor.tokenizer.pad(
             label_features, return_tensors="pt"
         )
-        labels = labels_batch["input_ids"].masked_fill(
-            labels_batch.attention_mask.ne(1), -100
+        
+        # ── CRITICAL FIX: TRUNCATE LABELS ──
+        # Whisper max length is 448. We clamp to 448 to prevent crashes.
+        labels = labels_batch["input_ids"]
+        if labels.shape[1] > 448:
+            labels = labels[:, :448]
+        
+        labels = labels.masked_fill(
+            labels_batch.attention_mask[:, :labels.shape[1]].ne(1), -100
         )
 
         if (labels[:, 0] == self.processor.tokenizer.bos_token_id).all().cpu().item():
@@ -123,8 +118,6 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         batch["labels"] = labels
         return batch
 
-
-# ── Load model with LoRA ──────────────────────────────────────────
 def load_model_with_lora():
     print("Loading Whisper processor...")
     processor = WhisperProcessor.from_pretrained(
@@ -136,14 +129,24 @@ def load_model_with_lora():
     print("Loading Whisper model...")
     model = WhisperForConditionalGeneration.from_pretrained(
         BASE_MODEL,
-        torch_dtype=torch.float32,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         device_map="auto"
     )
     model.generation_config.forced_decoder_ids = None
     model.generation_config.suppress_tokens    = []
     model.config.use_cache                     = False
 
-    # LoRA config
+    # ── THE ULTIMATE PEFT/WHISPER PATCH ──
+    old_forward = model.forward
+    @wraps(old_forward) # <-- Preserves signature to avoid KeyErrors
+    def safe_forward(*args, **kwargs):
+        # Strip ALL text-specific kwargs injected by PEFT
+        kwargs.pop("input_ids", None)
+        kwargs.pop("inputs_embeds", None)
+        return old_forward(*args, **kwargs)
+    model.forward = safe_forward
+
+    print("Applying LoRA layers config...")
     lora_config = LoraConfig(
         r=32,
         lora_alpha=64,
@@ -158,35 +161,29 @@ def load_model_with_lora():
 
     return model, processor
 
-
-# ── Training function ─────────────────────────────────────────────
 def run_finetuning():
     print("\n" + "="*50)
-    print("  WHISPER FINE-TUNING V2")
-    print("  (augmented data + validation + vocabulary)")
+    print("  WHISPER FINE-TUNING V2 (BULLETPROOF ENGINE)")
     print("="*50)
 
-    # Load data
-    print("\nLoading datasets...")
-    df_train = pd.read_csv(TRAIN_CSV)
-    df_val   = pd.read_csv(VAL_CSV)
+    processed_dataset_path = "/content/whisper_medium_processed_african_dataset"
+    if not os.path.exists(processed_dataset_path):
+        raise FileNotFoundError(f"❌ Processed dataset not found at {processed_dataset_path}. Please run ETL first!")
 
-    print(f"Training samples:   {len(df_train)}")
-    print(f"Validation samples: {len(df_val)}")
-    print(f"Augmented types:    {df_train['aug_type'].value_counts().to_dict() if 'aug_type' in df_train.columns else 'N/A'}")
-
-    # Load model
+    print(f"\n📥 Loading dataset matrix from {processed_dataset_path}...")
+    dataset_dict = load_from_disk(processed_dataset_path)
+    
     model, processor = load_model_with_lora()
 
-    # Load vocabulary prompt
-    prompt_ids = get_initial_prompt(processor.tokenizer)
+    print("Wrapping datasets with adaptive feature extraction...")
+    train_dataset = AdaptiveWhisperDataset(dataset_dict["train"], processor)
+    val_dataset   = AdaptiveWhisperDataset(dataset_dict["validation"], processor)
 
-    # Create datasets
-    train_dataset = AfriSpeechDataset(df_train, processor, prompt_ids)
-    val_dataset   = AfriSpeechDataset(df_val,   processor, prompt_ids)
+    print(f"✅ Loaded Training samples:   {len(train_dataset)}")
+    print(f"✅ Loaded Validation samples: {len(val_dataset)}")
+
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
 
-    # Training arguments with validation
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     training_args = Seq2SeqTrainingArguments(
         output_dir=OUTPUT_DIR,
@@ -210,10 +207,10 @@ def run_finetuning():
         report_to=["tensorboard"],
         predict_with_generate=False,
         push_to_hub=False,
-        dataloader_num_workers=2,
+        dataloader_num_workers=0,
+        remove_unused_columns=False, # <-- Locked down
     )
 
-    # Trainer with validation
     trainer = Seq2SeqTrainer(
         args=training_args,
         model=model,
@@ -223,11 +220,8 @@ def run_finetuning():
         processing_class=processor,
     )
 
-    # Train
-    print("\nStarting training...")
-
+    print("\n🚀 Launching training loop engine...")
     checkpoint = None
-
     if RESUME_FROM_CHECKPOINT:
         checkpoint = get_last_checkpoint(CHECKPOINT_DIR)
 
@@ -235,23 +229,21 @@ def run_finetuning():
         print(f"🔁 Resuming from checkpoint: {checkpoint}")
         trainer.train(resume_from_checkpoint=checkpoint)
     else:
-        print("🆕 Starting fresh training")
+        print("🆕 Starting fresh training run")
         trainer.train()
 
     experiment = {
-    "model": BASE_MODEL,
-    "steps": MAX_STEPS,
-    "learning_rate": LEARNING_RATE,
-    "batch_size": BATCH_SIZE,
+        "model": BASE_MODEL,
+        "steps": MAX_STEPS,
+        "learning_rate": LEARNING_RATE,
+        "batch_size": BATCH_SIZE,
     }
-
     with open(os.path.join(OUTPUT_DIR, "experiment.json"), "w") as f:
         json.dump(experiment, f, indent=2)
 
-    # Save best model
-    print("\nSaving best model...")
+    print("\n💾 Saving optimized best model weights...")
     model.save_pretrained(OUTPUT_DIR)
-    processor. save_pretrained(OUTPUT_DIR)
+    processor.save_pretrained(OUTPUT_DIR)
 
     print("\n" + "="*50)
     print("  FINE-TUNING V2 COMPLETE")
@@ -259,4 +251,3 @@ def run_finetuning():
     print("="*50)
 
     return model, processor
-

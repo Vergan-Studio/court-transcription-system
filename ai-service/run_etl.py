@@ -1,32 +1,39 @@
-
 import sys
 import os
-import pandas as pd
-sys.path.insert(0, "/content/drive/MyDrive/speech-to-text-system/ai-service")
+from transformers import WhisperProcessor
 
-METADATA_PATH  = "/content/drive/MyDrive/datasets/afrispeech/metadata/train_processed.csv"
-TRAIN_SPLIT    = "/content/drive/MyDrive/datasets/afrispeech/metadata/train_split.csv"
-VAL_SPLIT      = "/content/drive/MyDrive/datasets/afrispeech/metadata/val_split.csv"
+# Append directory to paths to allow modular importing
+sys.path.append('/content/court-transcription-system/ai-service')
+from dataset_builder import build_stratified_hf_datasets
 
-# Only run full ETL if processed metadata doesnt exist
-if os.path.exists(METADATA_PATH):
-    print("Processed metadata already exists - skipping ETL transform")
-    print(f"Loading: {METADATA_PATH}")
-    df_processed = pd.read_csv(METADATA_PATH)
-    print(f"Loaded {len(df_processed)} samples")
-else:
-    print("Running full ETL pipeline...")
-    from app.services.etl_service import run_etl
-    df_processed = run_etl(split="train")
+def main():
+    print("🚀 --- LAUNCHING PRODUCTION ETL FEATURE MAPPER --- 🚀")
+    
+    # 1. Run our newly created structural dataset builder code
+    hf_datasets = build_stratified_hf_datasets(hf_token=None)
+    
+    # 2. Load the pipeline processor assets
+    print("\n📥 Loading pretrained Whisper processing assets...")
+    processor = WhisperProcessor.from_pretrained("openai/whisper-medium", language="en", task="transcribe")
+    
+    # 3. Vectorization wrapper logic
+    def prepare_dataset(batch):
+        audio = batch["audio"]
+        batch["input_features"] = processor.feature_extractor(
+            audio["array"], 
+            sampling_rate=audio["sampling_rate"]
+        ).input_features[0]
+        
+        batch["labels"] = processor.tokenizer(batch["sentence"]).input_ids
+        return batch
 
-# Always create train/val split if it doesnt exist
-if os.path.exists(TRAIN_SPLIT) and os.path.exists(VAL_SPLIT):
-    print("Train/val split already exists - skipping")
-    df_train = pd.read_csv(TRAIN_SPLIT)
-    df_val   = pd.read_csv(VAL_SPLIT)
-    print(f"Train: {len(df_train)} samples")
-    print(f"Val:   {len(df_val)} samples")
-else:
-    print("Creating train/val split...")
-    from app.services.etl_service import create_train_val_split
-    df_train, df_val = create_train_val_split(df_processed)
+    print("\n⚡ Transforming raw audio inputs into Whisper Medium Mel-Spectrogram blocks...")
+    processed_datasets = hf_datasets.map(prepare_dataset, remove_columns=hf_datasets["train"].column_names)
+    
+    # 4. Save to target storage directory
+    output_dir = "/content/whisper_medium_processed_african_dataset"
+    processed_datasets.save_to_disk(output_dir)
+    print(f"\n💾 SUCCESS! Advanced ETL clean features written to disk at: {output_dir}")
+
+if __name__ == "__main__":
+    main()
